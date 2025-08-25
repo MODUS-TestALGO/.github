@@ -1,0 +1,20 @@
+name: Bug
+description: Bug
+title: "[Bug]: "
+labels: ["bug"]
+type: "bug"
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Beschreibe den Fehler
+  - type: textarea
+    id: description
+    attributes:
+      label: Beschreibung
+      description: Beschreibung des Fehlers
+      placeholder: Beschreibe die Fehlers!
+      value: "Beschreibung des Fehlers"
+    validations:
+      required: true
