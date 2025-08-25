@@ -1,0 +1,20 @@
+name: Feature
+description: Anforderungsbeschreibung
+title: "[Feature]: "
+labels: ["enhancement"]
+type: "feature"
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Bitte beschreibe die Anforderung so genau wie möglich.
+  - type: textarea
+    id: description
+    attributes:
+      label: Beschreibung
+      description: Beschreibung der Anforderung
+      placeholder: Beschreibe die Anforderung!
+      value: "Anforderungsbeschreibung"
+    validations:
+      required: true
