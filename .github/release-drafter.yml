@@ -1,5 +1,4 @@
-name-template: 'v$RESOLVED_VERSION 🌈'
-tag-template: 'v$RESOLVED_VERSION'
+name-template: 'Nächstes Release'
 
 categories:
   - title: '🚀 Features'
@@ -18,7 +17,10 @@ change-template: |
 # $CHANGES rendert die Kategorien automatisch (nur nicht-leere)
 template: |
   $CHANGES
-
+  
+exclude-labels:
+  - 'skip-changelog'
+  
 replacers:
   # 1) Innerhalb EINES Body-Blocks: Linie "### Changelog Text" finden,
   #    und ALLES danach bis zum BODY:END übernehmen.
