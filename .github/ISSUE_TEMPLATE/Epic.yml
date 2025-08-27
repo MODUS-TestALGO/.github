@@ -1,0 +1,28 @@
+name: Epic
+description: Größeres Vorhaben oder Sammelthema
+title: "[Epic]: "
+labels: ["epic"]
+type: issue
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Bitte beschreibe das Epic. 
+        Ein Epic ist ein übergeordnetes Vorhaben, das in mehrere Features oder Tasks aufgeteilt werden kann.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Beschreibung
+      description: Worum geht es in diesem Epic?
+      placeholder: Beschreibe das Epic!
+    validations:
+      required: true
+
+  - type: textarea
+    id: goals
+    attributes:
+      label: Ziele
+      description: Welche Ziele sollen mit diesem Epic erreicht werden?
+      placeholder: Ziele auflisten...
