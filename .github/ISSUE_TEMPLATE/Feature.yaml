@@ -15,6 +15,5 @@ body:
       label: Beschreibung
       description: Beschreibung der Anforderung
       placeholder: Beschreibe die Anforderung!
-      value: "Anforderungsbeschreibung"
     validations:
       required: true
