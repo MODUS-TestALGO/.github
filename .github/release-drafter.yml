@@ -32,11 +32,3 @@ replacers:
   # 2) Fallback/Aufräumen: Alle übrigen Body-Blöcke (ohne Marker) komplett entfernen.
   - search: '/<!-- BODY:START -->[\s\S]*?<!-- BODY:END -->/g'
     replace: ''
-    
-autolabeler:
-  - label: 'bug'
-    branch:
-      - '/fix\/.+/'
-  - label: 'enhancement'
-    branch:
-      - '/feature\/.+/'
