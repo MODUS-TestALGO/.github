@@ -1,0 +1,83 @@
+name: Reorganize Release Notes
+
+on:
+  workflow_call:
+    inputs:
+      release-id:
+        description: 'GitHub Release ID'
+        required: true
+        type: string
+      repository:
+        description: 'Repository in format owner/repo (defaults to calling repo)'
+        required: false
+        type: string
+        default: ${{ github.repository }}
+    secrets:
+      github-token:
+        description: 'GitHub token with contents:write permission'
+        required: false
+
+jobs:
+  reorganize:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout central .github repo
+        uses: actions/checkout@v4
+        with:
+          repository: MODUS-TestALGO/.github
+          path: .github-central
+      
+      - name: Reorganize Release Notes
+        shell: pwsh
+        env:
+          RELEASE_ID: ${{ inputs.release-id }}
+          REPOSITORY: ${{ inputs.repository }}
+          GITHUB_TOKEN: ${{ secrets.github-token || secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          
+          # Parse repository
+          $parts = $env:REPOSITORY -split '/'
+          $Owner = $parts[0]
+          $Repo = $parts[1]
+          
+          Write-Host "→ Reorganizing release notes for $Owner/$Repo" -ForegroundColor Cyan
+          
+          # Hole aktuellen Release-Body
+          $release = gh api "repos/$Owner/$Repo/releases/$env:RELEASE_ID" | ConvertFrom-Json
+          $currentBody = $release.body
+          
+          if ([string]::IsNullOrWhiteSpace($currentBody)) {
+            Write-Host "⚠️  Release body is empty - skipping" -ForegroundColor Yellow
+            exit 0
+          }
+          
+          # Prüfe ob Script existiert
+          $scriptPath = ".github-central/scripts/Reorganize-ReleaseNotes.ps1"
+          if (-not (Test-Path $scriptPath)) {
+            Write-Host "❌ Script not found at: $scriptPath" -ForegroundColor Red
+            exit 1
+          }
+          
+          try {
+            # Reorganisieren
+            Write-Host "→ Running reorganization script..."
+            $reorganized = & $scriptPath -MarkdownInput $currentBody -Owner $Owner -Repo $Repo
+            
+            if ([string]::IsNullOrWhiteSpace($reorganized)) {
+              Write-Host "⚠️  Reorganization returned empty - keeping original" -ForegroundColor Yellow
+              exit 0
+            }
+            
+            Write-Host "✓ Reorganized: $($currentBody.Length) → $($reorganized.Length) chars"
+            
+            # Release-Body updaten
+            $updatePayload = @{ body = $reorganized } | ConvertTo-Json -Depth 10
+            $updatePayload | gh api -X PATCH "repos/$Owner/$Repo/releases/$env:RELEASE_ID" --input -
+            
+            Write-Host "✅ Release notes reorganized successfully!" -ForegroundColor Green
+          }
+          catch {
+            Write-Host "❌ Reorganization failed: $($_.Exception.Message)" -ForegroundColor Red
+            exit 1
+          }
