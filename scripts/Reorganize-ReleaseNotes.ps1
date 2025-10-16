@@ -9,6 +9,8 @@
     
     PRs with the same issue are grouped together with separators.
     PRs belonging to multiple apps appear in each app section.
+    
+    Labels (App:*, issue-*) are fetched live from GitHub via gh CLI.
 
 .PARAMETER MarkdownInput
     The raw markdown from Release Drafter
@@ -36,12 +38,56 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+function Get-PRLabels {
+    <#
+    .SYNOPSIS
+        Fetches PR labels from GitHub using gh CLI
+    #>
+    param(
+        [int]$PRNumber,
+        [string]$Owner,
+        [string]$Repo
+    )
+    
+    try {
+        $repoPath = "$Owner/$Repo"
+        $labelsJson = gh pr view $PRNumber --repo $repoPath --json labels 2>$null
+        
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Failed to fetch labels for PR #$PRNumber (exit code: $LASTEXITCODE)"
+            return @()
+        }
+        
+        if ([string]::IsNullOrWhiteSpace($labelsJson)) {
+            Write-Verbose "No labels found for PR #$PRNumber"
+            return @()
+        }
+        
+        $labelObjects = ($labelsJson | ConvertFrom-Json).labels
+        if (-not $labelObjects) {
+            return @()
+        }
+        
+        $labels = $labelObjects | Select-Object -ExpandProperty name
+        Write-Verbose "  Fetched $($labels.Count) labels for PR #$PRNumber"
+        return @($labels)
+    }
+    catch {
+        Write-Warning "Exception fetching labels for PR #$PRNumber : $($_.Exception.Message)"
+        return @()
+    }
+}
+
 function Parse-ReleaseNotes {
     <#
     .SYNOPSIS
         Parses Release Drafter markdown into structured data
     #>
-    param([string]$Markdown)
+    param(
+        [string]$Markdown,
+        [string]$Owner,
+        [string]$Repo
+    )
     
     $lines = $Markdown -split "`r?`n"
     $prs = @()
@@ -59,51 +105,52 @@ function Parse-ReleaseNotes {
         }
         
         # PR-Eintrag erkennen (### Issue Title - #123)
-        # Format: ### <PRTitle> - #<PRNum>
         if ($line -match '^###\s+(.+?)\s+-\s+#(\d+)\s*$') {
             # Vorherigen PR abschließen
             if ($currentPR) {
                 $prs += $currentPR
             }
             
+            $prNumber = [int]$Matches[2]
+            $prTitle = $Matches[1].Trim()
+            
             $currentPR = @{
                 Category = $currentCategory
-                IssueNumber = 0  # Wird aus Labels extrahiert
-                IssueTitle = $Matches[1].Trim()  # Das ist der Issue-Titel
-                PRNumber = [int]$Matches[2]
+                IssueNumber = 0
+                IssueTitle = $prTitle
+                PRNumber = $prNumber
                 Content = [System.Collections.Generic.List[string]]::new()
                 Apps = [System.Collections.Generic.List[string]]::new()
             }
             
-            Write-Verbose "Found PR #$($currentPR.PRNumber): $($currentPR.IssueTitle)"
+            Write-Host "Found PR #$prNumber : $prTitle"
+            
+            # Hole Labels via GitHub CLI
+            $labels = Get-PRLabels -PRNumber $prNumber -Owner $Owner -Repo $Repo
+            
+            foreach ($label in $labels) {
+                # App:AppName Labels extrahieren
+                if ($label -match '^App:(.+)$') {
+                    $appName = $Matches[1].Trim()
+                    if ($appName -and -not $currentPR.Apps.Contains($appName)) {
+                        $currentPR.Apps.Add($appName)
+                        Write-Verbose "  → App: $appName"
+                    }
+                }
+                
+                # issue-X Label extrahieren
+                if ($label -match '^issue-(\d+)$') {
+                    $currentPR.IssueNumber = [int]$Matches[1]
+                    Write-Verbose "  → Issue: #$($currentPR.IssueNumber)"
+                }
+            }
+            
             continue
         }
         
         # Content sammeln (alles zwischen PR-Header und nächstem Header)
         if ($currentPR -and $line.Trim() -ne '' -and -not ($line -match '^#{1,3}\s')) {
             $currentPR.Content.Add($line)
-            
-            # Extrahiere Labels aus Kommentar
-            # Format: <!-- labels: enhancement,App:Basedata,issue-10 -->
-            if ($line -match '<!--\s*labels:\s*([^-]+?)-->') {
-                $labelSection = $Matches[1]
-                
-                # Finde App:AppName Labels
-                $appMatches = [regex]::Matches($labelSection, 'App:([^,\s]+)')
-                foreach ($match in $appMatches) {
-                    $appName = $match.Groups[1].Value.Trim()
-                    if ($appName -and -not $currentPR.Apps.Contains($appName)) {
-                        $currentPR.Apps.Add($appName)
-                        Write-Verbose "  Found app: $appName"
-                    }
-                }
-                
-                # Finde issue-X Label
-                if ($labelSection -match 'issue-(\d+)') {
-                    $currentPR.IssueNumber = [int]$Matches[1]
-                    Write-Verbose "  Found issue number: $($currentPR.IssueNumber)"
-                }
-            }
         }
     }
     
@@ -256,9 +303,18 @@ if ([string]::IsNullOrWhiteSpace($MarkdownInput)) {
     exit 0
 }
 
+# GitHub CLI verfügbar?
+$ghAvailable = Get-Command gh -ErrorAction SilentlyContinue
+if (-not $ghAvailable) {
+    Write-Error "GitHub CLI (gh) is not available. Please install it: https://cli.github.com/"
+    Write-Warning "Outputting original markdown"
+    Write-Output $MarkdownInput
+    exit 1
+}
+
 try {
-    # Parse
-    $prs = Parse-ReleaseNotes -Markdown $MarkdownInput
+    # Parse mit Live-Label-Fetch
+    $prs = Parse-ReleaseNotes -Markdown $MarkdownInput -Owner $Owner -Repo $Repo
     
     if (-not $prs -or $prs.Count -eq 0) {
         Write-Warning "No PRs found in markdown - outputting original"

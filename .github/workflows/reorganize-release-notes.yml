@@ -4,80 +4,76 @@ on:
   workflow_call:
     inputs:
       release-id:
-        description: 'GitHub Release ID'
+        description: 'The ID of the draft release to reorganize'
         required: true
         type: string
-      repository:
-        description: 'Repository in format owner/repo (defaults to calling repo)'
-        required: false
-        type: string
-        default: ${{ github.repository }}
     secrets:
       github-token:
         description: 'GitHub token with contents:write permission'
-        required: false
+        required: true
 
 jobs:
   reorganize:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout central .github repo
+      - name: Checkout reusable workflow repo
         uses: actions/checkout@v4
         with:
           repository: MODUS-TestALGO/.github
-          path: .github-central
+          ref: main
+          path: .github-scripts
       
-      - name: Reorganize Release Notes
-        shell: pwsh
+      - name: Get release body
+        id: get-release
         env:
-          RELEASE_ID: ${{ inputs.release-id }}
-          REPOSITORY: ${{ inputs.repository }}
-          GITHUB_TOKEN: ${{ secrets.github-token || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.github-token }}
         run: |
-          $ErrorActionPreference = "Stop"
+          RELEASE_BODY=$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            /repos/${{ github.repository }}/releases/${{ inputs.release-id }} \
+            --jq '.body')
           
-          # Parse repository
-          $parts = $env:REPOSITORY -split '/'
-          $Owner = $parts[0]
-          $Repo = $parts[1]
+          # Save to file to handle multiline content
+          echo "$RELEASE_BODY" > release-body.md
+          echo "✓ Fetched release body (${{ inputs.release-id }})"
+      
+      - name: Reorganize release notes
+        id: reorganize
+        env:
+          GH_TOKEN: ${{ secrets.github-token }}
+        run: |
+          OWNER="${{ github.repository_owner }}"
+          REPO="${{ github.event.repository.name }}"
           
-          Write-Host "→ Reorganizing release notes for $Owner/$Repo" -ForegroundColor Cyan
+          echo "Running reorganization script..."
+          pwsh .github-scripts/scripts/Reorganize-ReleaseNotes.ps1 \
+            -MarkdownInput "$(cat release-body.md)" \
+            -Owner "$OWNER" \
+            -Repo "$REPO" \
+            > reorganized-body.md
           
-          # Hole aktuellen Release-Body
-          $release = gh api "repos/$Owner/$Repo/releases/$env:RELEASE_ID" | ConvertFrom-Json
-          $currentBody = $release.body
+          echo "✓ Reorganization complete"
+      
+      - name: Update release
+        env:
+          GH_TOKEN: ${{ secrets.github-token }}
+        run: |
+          REORGANIZED_BODY=$(cat reorganized-body.md)
           
-          if ([string]::IsNullOrWhiteSpace($currentBody)) {
-            Write-Host "⚠️  Release body is empty - skipping" -ForegroundColor Yellow
-            exit 0
-          }
+          gh api \
+            --method PATCH \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            /repos/${{ github.repository }}/releases/${{ inputs.release-id }} \
+            -f "body=$REORGANIZED_BODY"
           
-          # Prüfe ob Script existiert
-          $scriptPath = ".github-central/scripts/Reorganize-ReleaseNotes.ps1"
-          if (-not (Test-Path $scriptPath)) {
-            Write-Host "❌ Script not found at: $scriptPath" -ForegroundColor Red
-            exit 1
-          }
-          
-          try {
-            # Reorganisieren
-            Write-Host "→ Running reorganization script..."
-            $reorganized = & $scriptPath -MarkdownInput $currentBody -Owner $Owner -Repo $Repo
-            
-            if ([string]::IsNullOrWhiteSpace($reorganized)) {
-              Write-Host "⚠️  Reorganization returned empty - keeping original" -ForegroundColor Yellow
-              exit 0
-            }
-            
-            Write-Host "✓ Reorganized: $($currentBody.Length) → $($reorganized.Length) chars"
-            
-            # Release-Body updaten
-            $updatePayload = @{ body = $reorganized } | ConvertTo-Json -Depth 10
-            $updatePayload | gh api -X PATCH "repos/$Owner/$Repo/releases/$env:RELEASE_ID" --input -
-            
-            Write-Host "✅ Release notes reorganized successfully!" -ForegroundColor Green
-          }
-          catch {
-            Write-Host "❌ Reorganization failed: $($_.Exception.Message)" -ForegroundColor Red
-            exit 1
-          }
+          echo "✅ Release updated successfully!"
+      
+      - name: Comment on PRs (optional)
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.github-token }}
+        run: |
+          echo "Release draft updated with reorganized notes"
+          # Optional: Add logic to comment on PRs about release inclusion
