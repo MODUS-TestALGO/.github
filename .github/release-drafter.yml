@@ -1,51 +1,75 @@
-name-template: 'Nächstes Release'
-tag-template: 'v$RESOLVED_VERSION'
+name: MODUS Release Drafter
 
-# Kategorisierung nach Feature/Bug
-categories:
-  - title: '🚀 Features'
-    labels: ['feature', 'enhancement']
-  - title: '🐛 Bug Fixes'
-    labels: ['fix', 'bugfix', 'bug']
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
 
-# Template pro PR
-# Titel = Issue-Titel (automatisch gesetzt durch Webhook)
-# Labels versteckt für Reorganisierungs-Script
-change-template: |
-  ### $TITLE - #$NUMBER
-  <!-- labels: $LABELS -->
-  <!-- BODY:START -->
-  $BODY
-  <!-- BODY:END -->
+permissions:
+  contents: write
+  pull-requests: write
 
-# Haupt-Template: Nur die Kategorien rendern
-template: |
-  $CHANGES
-
-# Exclude Skip-Changelog PRs
-exclude-labels:
-  - 'skip-changelog'
-
-# Version resolution
-version-resolver:
-  major:
-    labels: ['major']
-  minor:
-    labels: ['minor', 'feature', 'enhancement']
-  patch:
-    labels: ['patch', 'bug', 'fix', 'bugfix']
-  default: patch
-
-# Replacer: Extrahiere Changelog-Text aus PR-Body
-replacers:
-  # 1) Finde "### Changelog Text" Sektion und übernehme alles danach bis BODY:END
-  - search: '/<!-- BODY:START -->((?:(?!<!-- BODY:END -->)[\s\S])*?)^###\s*Changelog\s*Text\s*:?\s*\r?\n([\s\S]*?)<!-- BODY:END -->/gmi'
-    replace: '$2'
-  
-  # 2) Fallback: Entferne alle verbleibenden Body-Blöcke ohne Changelog-Marker
-  - search: '/<!-- BODY:START -->[\s\S]*?<!-- BODY:END -->/g'
-    replace: ''
-
-# Sortierung nach Titel (damit Issues gruppiert sind)
-sort-by: 'title'
-sort-direction: 'ascending'
+jobs:
+  release_drafter:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Run Release Drafter
+        uses: release-drafter/release-drafter@v6
+        id: release_drafter
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
+      # 🆕 NEU: Reorganisiere Draft sofort nach Update
+      - name: Reorganize Draft Release Notes
+        if: ${{ steps.release_drafter.outputs.id != '' }}
+        shell: pwsh
+        env:
+          RELEASE_ID: ${{ steps.release_drafter.outputs.id }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $Owner = "${{ github.repository_owner }}"
+          $Repo = "${{ github.event.repository.name }}"
+          
+          Write-Host "→ Reorganizing draft release notes..." -ForegroundColor Cyan
+          
+          # Hole aktuellen Draft-Body
+          $release = gh api "repos/$Owner/$Repo/releases/$env:RELEASE_ID" | ConvertFrom-Json
+          $currentBody = $release.body
+          
+          if ([string]::IsNullOrWhiteSpace($currentBody)) {
+            Write-Host "⚠️  Draft body is empty - skipping" -ForegroundColor Yellow
+            exit 0
+          }
+          
+          # Prüfe ob Script existiert
+          $scriptPath = ".github/scripts/Reorganize-ReleaseNotes.ps1"
+          if (-not (Test-Path $scriptPath)) {
+            Write-Host "⚠️  Reorganization script not found - skipping" -ForegroundColor Yellow
+            exit 0
+          }
+          
+          try {
+            # Reorganisieren
+            $reorganized = & $scriptPath -MarkdownInput $currentBody -Owner $Owner -Repo $Repo
+            
+            if ([string]::IsNullOrWhiteSpace($reorganized)) {
+              Write-Host "⚠️  Reorganization returned empty - keeping original" -ForegroundColor Yellow
+              exit 0
+            }
+            
+            # Draft-Body updaten
+            $updatePayload = @{ body = $reorganized } | ConvertTo-Json -Depth 10
+            $updatePayload | gh api -X PATCH "repos/$Owner/$Repo/releases/$env:RELEASE_ID" --input -
+            
+            Write-Host "✅ Draft reorganized successfully!" -ForegroundColor Green
+          }
+          catch {
+            Write-Host "⚠️  Reorganization failed: $($_.Exception.Message)" -ForegroundColor Yellow
+            Write-Host "   Keeping original draft body" -ForegroundColor Yellow
+            # Fehler nicht durchreichen - Draft bleibt halt flach
+            exit 0
+          }
