@@ -1,5 +1,4 @@
 name-template: 'Nächstes Release'
-tag-template: 'v$RESOLVED_VERSION'
 
 categories:
   - title: '🚀 Features'
@@ -7,31 +6,29 @@ categories:
   - title: '🐛 Bug Fixes'
     labels: ['fix', 'bugfix', 'bug']
 
-# Vereinfachtes Template ohne $LABELS
+# Pro PR-Eintrag: Überschrift + PR-Body-Ausschnitt
 change-template: |
   ### $TITLE - #$NUMBER
-  $BODY
 
+  <!-- BODY:START -->
+  $BODY
+  <!-- BODY:END -->
+
+# $CHANGES rendert die Kategorien automatisch (nur nicht-leere)
 template: |
   $CHANGES
-
+  
 exclude-labels:
   - 'skip-changelog'
-
-version-resolver:
-  major:
-    labels: ['major']
-  minor:
-    labels: ['minor', 'feature', 'enhancement']
-  patch:
-    labels: ['patch', 'bug', 'fix', 'bugfix']
-  default: patch
-
-# Replacer um "Changelog Text" aus PR-Body zu extrahieren
+  
 replacers:
-  # Extrahiere nur den Changelog-Text Abschnitt
-  - search: '/^###\s*Changelog\s*Text\s*:?\s*\r?\n([\s\S]*?)$/gmi'
-    replace: '$1'
+  # 1) Innerhalb EINES Body-Blocks: Linie "### Changelog Text" finden,
+  #    und ALLES danach bis zum BODY:END übernehmen.
+  #    Das "tempered dot" ((?:(?!<!-- BODY:END -->)[\s\S])*) verhindert,
+  #    dass über den eigenen BODY-Block hinaus gematcht wird.
+  - search: '/<!-- BODY:START -->((?:(?!<!-- BODY:END -->)[\s\S])*?)^###\s*Changelog\s*Text\s*:?\s*\r?\n([\s\S]*?)<!-- BODY:END -->/gmi'
+    replace: '$2'
 
-sort-by: 'title'
-sort-direction: 'ascending'
+  # 2) Fallback/Aufräumen: Alle übrigen Body-Blöcke (ohne Marker) komplett entfernen.
+  - search: '/<!-- BODY:START -->[\s\S]*?<!-- BODY:END -->/g'
+    replace: ''
