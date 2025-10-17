@@ -37,6 +37,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$DebugPreference = if ($PSBoundParameters['Verbose']) { 'Continue' } else { 'SilentlyContinue' }
 
 function Get-PRLabels {
     <#
@@ -51,26 +52,30 @@ function Get-PRLabels {
     
     try {
         $repoPath = "$Owner/$Repo"
-        $labelsJson = gh pr view $PRNumber --repo $repoPath --json labels 2>$null
+        Write-Debug "Fetching labels for PR #$PRNumber from $repoPath"
+        
+        $labelsJson = gh pr view $PRNumber --repo $repoPath --json labels 2>&1
         
         if ($LASTEXITCODE -ne 0) {
-            Write-Warning "Failed to fetch labels for PR #$PRNumber (exit code: $LASTEXITCODE)"
+            Write-Warning "gh CLI returned exit code $LASTEXITCODE for PR #$PRNumber"
+            Write-Debug "gh output: $labelsJson"
             return @()
         }
         
         if ([string]::IsNullOrWhiteSpace($labelsJson)) {
-            Write-Verbose "No labels found for PR #$PRNumber"
+            Write-Debug "Empty response from gh CLI for PR #$PRNumber"
             return @()
         }
         
-        $labelObjects = ($labelsJson | ConvertFrom-Json).labels
-        if (-not $labelObjects) {
+        $parsed = $labelsJson | ConvertFrom-Json
+        if (-not $parsed -or -not $parsed.labels) {
+            Write-Debug "No labels property in response for PR #$PRNumber"
             return @()
         }
         
-        $labels = $labelObjects | Select-Object -ExpandProperty name
-        Write-Verbose "  Fetched $($labels.Count) labels for PR #$PRNumber"
-        return @($labels)
+        $labels = @($parsed.labels | Select-Object -ExpandProperty name)
+        Write-Debug "Found $($labels.Count) labels for PR #$PRNumber : $($labels -join ', ')"
+        return $labels
     }
     catch {
         Write-Warning "Exception fetching labels for PR #$PRNumber : $($_.Exception.Message)"
@@ -89,18 +94,23 @@ function Parse-ReleaseNotes {
         [string]$Repo
     )
     
+    Write-Debug "Starting to parse markdown (Length: $($Markdown.Length))"
+    
     $lines = $Markdown -split "`r?`n"
+    Write-Debug "Split into $($lines.Count) lines"
+    
     $prs = @()
     $currentCategory = $null
     $currentPR = $null
     
     for ($i = 0; $i -lt $lines.Count; $i++) {
         $line = $lines[$i]
+        Write-Debug "Line $i : $($line.Substring(0, [Math]::Min(50, $line.Length)))"
         
         # Kategorie erkennen (## 🚀 Features)
         if ($line -match '^##\s+(.+)$') {
             $currentCategory = $Matches[1].Trim()
-            Write-Verbose "Found category: $currentCategory"
+            Write-Host "Found category: $currentCategory" -ForegroundColor Cyan
             continue
         }
         
@@ -108,12 +118,16 @@ function Parse-ReleaseNotes {
         if ($line -match '^###\s+(.+?)\s+-\s+#(\d+)\s*$') {
             # Vorherigen PR abschließen
             if ($currentPR) {
+                Write-Debug "Finalizing previous PR #$($currentPR.PRNumber)"
                 $prs += $currentPR
             }
             
             $prNumber = [int]$Matches[2]
             $prTitle = $Matches[1].Trim()
             
+            Write-Host "Found PR #$prNumber : $prTitle" -ForegroundColor Green
+            
+            # Initialisiere neuen PR mit korrekten Typen
             $currentPR = @{
                 Category = $currentCategory
                 IssueNumber = 0
@@ -123,26 +137,32 @@ function Parse-ReleaseNotes {
                 Apps = [System.Collections.Generic.List[string]]::new()
             }
             
-            Write-Host "Found PR #$prNumber : $prTitle"
+            Write-Debug "Initialized PR object with empty Lists"
             
             # Hole Labels via GitHub CLI
             $labels = Get-PRLabels -PRNumber $prNumber -Owner $Owner -Repo $Repo
             
-            foreach ($label in $labels) {
-                # App:AppName Labels extrahieren
-                if ($label -match '^App:(.+)$') {
-                    $appName = $Matches[1].Trim()
-                    if ($appName -and -not $currentPR.Apps.Contains($appName)) {
-                        $currentPR.Apps.Add($appName)
-                        Write-Verbose "  → App: $appName"
+            if ($labels -and $labels.Count -gt 0) {
+                foreach ($label in $labels) {
+                    # App:AppName Labels extrahieren
+                    if ($label -match '^App:(.+)$') {
+                        $appName = $Matches[1].Trim()
+                        if ($appName -and -not $currentPR.Apps.Contains($appName)) {
+                            Write-Debug "Adding app: $appName"
+                            [void]$currentPR.Apps.Add($appName)
+                            Write-Host "  → App: $appName" -ForegroundColor Yellow
+                        }
+                    }
+                    
+                    # issue-X Label extrahieren
+                    if ($label -match '^issue-(\d+)$') {
+                        $currentPR.IssueNumber = [int]$Matches[1]
+                        Write-Host "  → Issue: #$($currentPR.IssueNumber)" -ForegroundColor Yellow
                     }
                 }
-                
-                # issue-X Label extrahieren
-                if ($label -match '^issue-(\d+)$') {
-                    $currentPR.IssueNumber = [int]$Matches[1]
-                    Write-Verbose "  → Issue: #$($currentPR.IssueNumber)"
-                }
+            }
+            else {
+                Write-Debug "No labels found for PR #$prNumber"
             }
             
             continue
@@ -150,16 +170,24 @@ function Parse-ReleaseNotes {
         
         # Content sammeln (alles zwischen PR-Header und nächstem Header)
         if ($currentPR -and $line.Trim() -ne '' -and -not ($line -match '^#{1,3}\s')) {
-            $currentPR.Content.Add($line)
+            Write-Debug "Adding content line to PR #$($currentPR.PRNumber)"
+            try {
+                [void]$currentPR.Content.Add($line)
+            }
+            catch {
+                Write-Warning "Failed to add content line: $($_.Exception.Message)"
+                Write-Debug "Line content: $line"
+            }
         }
     }
     
     # Letzten PR hinzufügen
     if ($currentPR) {
+        Write-Debug "Adding final PR #$($currentPR.PRNumber)"
         $prs += $currentPR
     }
     
-    Write-Host "✓ Parsed $($prs.Count) PRs from markdown"
+    Write-Host "✓ Parsed $($prs.Count) PRs from markdown" -ForegroundColor Green
     return $prs
 }
 
@@ -170,16 +198,30 @@ function Group-PRsByStructure {
     #>
     param([array]$PRs)
     
+    Write-Debug "Grouping $($PRs.Count) PRs"
+    
     # Structure: @{ Category > App > IssueNumber > @{ Title, PRs } }
     $structure = [ordered]@{}
     
     foreach ($pr in $PRs) {
+        Write-Debug "Processing PR #$($pr.PRNumber)"
+        
         $category = if ($pr.Category) { $pr.Category } else { 'Other' }
         $issue = $pr.IssueNumber
         $issueTitle = $pr.IssueTitle
         
+        # Behandle PRs ohne Issue (IssueNumber = 0)
+        if ($issue -eq 0) {
+            $issue = 999999
+            $issueTitle = "PRs without linked issue"
+        }
+        
+        # Konvertiere Issue zu String für Hashtable-Key
+        $issueKey = "issue_$issue"
+        
         # Initialisiere Kategorie
         if (-not $structure[$category]) {
+            Write-Debug "Creating category: $category"
             $structure[$category] = [ordered]@{}
         }
         
@@ -191,42 +233,59 @@ function Group-PRsByStructure {
         }
         
         foreach ($app in $apps) {
+            Write-Debug "  Processing app: $app"
+            
             # Initialisiere App
             if (-not $structure[$category][$app]) {
+                Write-Debug "  Creating app: $app"
                 $structure[$category][$app] = [ordered]@{}
             }
             
-            # Behandle PRs ohne Issue (IssueNumber = 0)
-            if ($issue -eq 0) {
-                # Gruppiere alle PRs ohne Issue unter einem "pseudo-issue"
-                $issue = 999999  # Hohe Nummer, damit sie ans Ende sortiert werden
-                $issueTitle = "PRs without linked issue"
-            }
-            
             # Initialisiere Issue
-            if (-not $structure[$category][$app][$issue]) {
-                $structure[$category][$app][$issue] = @{
+            if (-not $structure[$category][$app][$issueKey]) {
+                Write-Debug "  Creating issue: $issueKey (number: $issue)"
+                $structure[$category][$app][$issueKey] = @{
+                    IssueNumber = $issue
                     Title = $issueTitle
                     PRs = [System.Collections.Generic.List[object]]::new()
                 }
             }
             
+            # Erstelle PR Content String
+            $contentStr = if ($pr.Content -and $pr.Content.Count -gt 0) {
+                ($pr.Content -join "`n").Trim()
+            } else {
+                ""
+            }
+            
+            Write-Debug "  Adding PR to structure (content length: $($contentStr.Length))"
+            
             # PR hinzufügen
-            $structure[$category][$app][$issue].PRs.Add(@{
-                Number = $pr.PRNumber
-                Content = ($pr.Content -join "`n").Trim()
-            })
+            try {
+                [void]$structure[$category][$app][$issueKey].PRs.Add(@{
+                    Number = $pr.PRNumber
+                    Content = $contentStr
+                })
+            }
+            catch {
+                Write-Warning "Failed to add PR to structure: $($_.Exception.Message)"
+            }
         }
     }
     
     # Zähle Statistiken
     $categoryCount = $structure.Keys.Count
-    $appCount = ($structure.Values | ForEach-Object { $_.Keys.Count } | Measure-Object -Sum).Sum
-    $issueCount = ($structure.Values | ForEach-Object { 
-        $_.Values | ForEach-Object { $_.Keys.Count }
-    } | Measure-Object -Sum).Sum
+    $appCount = 0
+    $issueCount = 0
     
-    Write-Host "✓ Grouped into $categoryCount categories, $appCount apps, $issueCount issues"
+    foreach ($cat in $structure.Values) {
+        $appCount += $cat.Keys.Count
+        foreach ($app in $cat.Values) {
+            $issueCount += $app.Keys.Count
+        }
+    }
+    
+    Write-Host "✓ Grouped into $categoryCount categories, $appCount apps, $issueCount issues" -ForegroundColor Green
     return $structure
 }
 
@@ -237,46 +296,57 @@ function Build-ReorganizedMarkdown {
     #>
     param([hashtable]$Structure)
     
+    Write-Debug "Building reorganized markdown"
+    
     $md = [System.Collections.Generic.List[string]]::new()
     
     # Header mit Hinweis
-    $md.Add("<!-- Auto-reorganized by Reorganize-ReleaseNotes.ps1 -->")
-    $md.Add("")
+    [void]$md.Add("<!-- Auto-reorganized by Reorganize-ReleaseNotes.ps1 -->")
+    [void]$md.Add("")
     
     foreach ($category in $Structure.Keys) {
-        $md.Add("## $category")
-        $md.Add("")
+        Write-Debug "Processing category: $category"
+        [void]$md.Add("# $category")
+        [void]$md.Add("")
         
         foreach ($app in $Structure[$category].Keys | Sort-Object) {
-            $md.Add("### $app")
-            $md.Add("")
+            Write-Debug "  Processing app: $app"
+            [void]$md.Add("## $app")
+            [void]$md.Add("")
             
-            foreach ($issueNum in $Structure[$category][$app].Keys | Sort-Object) {
-                $issue = $Structure[$category][$app][$issueNum]
+            # Sortiere Issues nach IssueNumber
+            $sortedIssueKeys = $Structure[$category][$app].Keys | Sort-Object {
+                $Structure[$category][$app][$_].IssueNumber
+            }
+            
+            foreach ($issueKey in $sortedIssueKeys) {
+                $issue = $Structure[$category][$app][$issueKey]
+                $issueNum = $issue.IssueNumber
+                Write-Debug "    Processing issue: $issueNum"
                 
                 # Formatierung für Issue-Header
                 if ($issueNum -eq 999999) {
-                    # Spezielle Behandlung für PRs ohne Issue
-                    $md.Add("#### $($issue.Title)")
+                    [void]$md.Add("### $($issue.Title)")
                 } else {
-                    # Normale Issue-Referenz
-                    $md.Add("#### Issue #$issueNum - $($issue.Title)")
+                    [void]$md.Add("### Issue #$issueNum - $($issue.Title)")
                 }
                 
-                $md.Add("")
+                [void]$md.Add("")
                 
                 $prCount = $issue.PRs.Count
                 for ($i = 0; $i -lt $prCount; $i++) {
                     $pr = $issue.PRs[$i]
                     
                     # PR-Content
-                    $md.Add($pr.Content)
-                    $md.Add("")
+                    if (-not [string]::IsNullOrWhiteSpace($pr.Content)) {
+                        [void]$md.Add($pr.Content)
+                        [void]$md.Add("")
+                    }
                     
                     # Trennzeile zwischen PRs (aber nicht nach dem letzten)
                     if ($i -lt ($prCount - 1)) {
-                        $md.Add("---")
-                        $md.Add("")
+                        [void]$md.Add("---")
+                        [void]$md.Add("")
                     }
                 }
             }
@@ -284,7 +354,7 @@ function Build-ReorganizedMarkdown {
     }
     
     $result = ($md -join "`n").Trim()
-    Write-Host "✓ Generated reorganized markdown ($($result.Length) chars)"
+    Write-Host "✓ Generated reorganized markdown ($($result.Length) chars)" -ForegroundColor Green
     return $result
 }
 
@@ -314,6 +384,7 @@ if (-not $ghAvailable) {
 
 try {
     # Parse mit Live-Label-Fetch
+    Write-Debug "Starting parse phase"
     $prs = Parse-ReleaseNotes -Markdown $MarkdownInput -Owner $Owner -Repo $Repo
     
     if (-not $prs -or $prs.Count -eq 0) {
@@ -323,9 +394,11 @@ try {
     }
     
     # Gruppiere
+    Write-Debug "Starting grouping phase"
     $structure = Group-PRsByStructure -PRs $prs
     
     # Generiere neues Markdown
+    Write-Debug "Starting markdown generation phase"
     $reorganized = Build-ReorganizedMarkdown -Structure $structure
     
     if ([string]::IsNullOrWhiteSpace($reorganized)) {
@@ -344,6 +417,8 @@ try {
 }
 catch {
     Write-Error "Failed to reorganize release notes: $($_.Exception.Message)"
+    Write-Debug "Exception Type: $($_.Exception.GetType().FullName)"
+    Write-Debug "Stack Trace: $($_.ScriptStackTrace)"
     Write-Host ""
     Write-Warning "Outputting original markdown due to error"
     Write-Output $MarkdownInput
