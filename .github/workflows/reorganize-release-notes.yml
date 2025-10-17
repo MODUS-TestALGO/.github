@@ -7,6 +7,10 @@ on:
         description: 'The ID of the draft release to reorganize'
         required: true
         type: string
+      release-tag:
+        description: 'The tag name of the release (will be preserved)'
+        required: true
+        type: string
     secrets:
       github-token:
         description: 'GitHub token with contents:write permission'
@@ -27,53 +31,82 @@ jobs:
         id: get-release
         env:
           GH_TOKEN: ${{ secrets.github-token }}
+        shell: pwsh
         run: |
-          RELEASE_BODY=$(gh api \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            /repos/${{ github.repository }}/releases/${{ inputs.release-id }} \
-            --jq '.body')
+          # Set UTF-8 encoding
+          $PSDefaultParameterValues['Out-File:Encoding'] = 'utf8'
+          [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
           
-          # Save to file to handle multiline content
-          echo "$RELEASE_BODY" > release-body.md
-          echo "✓ Fetched release body (${{ inputs.release-id }})"
+          $releaseJson = gh api `
+            -H "Accept: application/vnd.github+json" `
+            -H "X-GitHub-Api-Version: 2022-11-28" `
+            /repos/${{ github.repository }}/releases/${{ inputs.release-id }}
+          
+          $release = $releaseJson | ConvertFrom-Json
+          $release.body | Out-File -FilePath release-body.md -Encoding UTF8 -NoNewline
+          
+          Write-Host "✓ Fetched release body (${{ inputs.release-id }})"
       
       - name: Reorganize release notes
         id: reorganize
         env:
           GH_TOKEN: ${{ secrets.github-token }}
+        shell: pwsh
         run: |
-          OWNER="${{ github.repository_owner }}"
-          REPO="${{ github.event.repository.name }}"
+          # Set UTF-8 encoding for correct emoji/umlaut handling
+          $PSDefaultParameterValues['Out-File:Encoding'] = 'utf8'
+          $PSDefaultParameterValues['*:Encoding'] = 'utf8'
+          [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
           
-          echo "Running reorganization script..."
-          pwsh .github-scripts/scripts/Reorganize-ReleaseNotes.ps1 \
-            -MarkdownInput "$(cat release-body.md)" \
-            -Owner "$OWNER" \
-            -Repo "$REPO" \
-            > reorganized-body.md
+          $Owner = "${{ github.repository_owner }}"
+          $Repo = "${{ github.event.repository.name }}"
           
-          echo "✓ Reorganization complete"
+          Write-Host "Running reorganization script..."
+          
+          $markdown = Get-Content release-body.md -Raw -Encoding UTF8
+          $result = & .github-scripts/scripts/Reorganize-ReleaseNotes.ps1 `
+            -MarkdownInput $markdown `
+            -Owner $Owner `
+            -Repo $Repo
+          
+          $result | Out-File -FilePath reorganized-body.md -Encoding UTF8 -NoNewline
+          
+          Write-Host "✓ Reorganization complete"
       
       - name: Update release
         env:
           GH_TOKEN: ${{ secrets.github-token }}
+        shell: pwsh
         run: |
-          REORGANIZED_BODY=$(cat reorganized-body.md)
+          # Set UTF-8 encoding
+          $PSDefaultParameterValues['*:Encoding'] = 'utf8'
+          [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
           
-          gh api \
-            --method PATCH \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            /repos/${{ github.repository }}/releases/${{ inputs.release-id }} \
-            -f "body=$REORGANIZED_BODY"
+          $reorganizedBody = Get-Content reorganized-body.md -Raw -Encoding UTF8
           
-          echo "✅ Release updated successfully!"
+          $updateData = @{
+            body = $reorganizedBody
+          } | ConvertTo-Json -Depth 10
+          
+          $tempJson = New-TemporaryFile
+          $updateData | Out-File -FilePath $tempJson.FullName -Encoding UTF8 -NoNewline
+          
+          gh api `
+            --method PATCH `
+            -H "Accept: application/vnd.github+json" `
+            -H "X-GitHub-Api-Version: 2022-11-28" `
+            /repos/${{ github.repository }}/releases/${{ inputs.release-id }} `
+            --input $tempJson.FullName
+          
+          Remove-Item $tempJson.FullName -Force -ErrorAction SilentlyContinue
+          
+          Write-Host "✅ Release updated successfully!"
       
       - name: Comment on PRs (optional)
         if: success()
         env:
           GH_TOKEN: ${{ secrets.github-token }}
+        shell: pwsh
         run: |
-          echo "Release draft updated with reorganized notes"
+          Write-Host "Release draft updated with reorganized notes"
           # Optional: Add logic to comment on PRs about release inclusion
